@@ -1,27 +1,40 @@
 # Aviation Weather MCP Server
 
-MCP server for aviation weather data. No API key required.
+Aviation weather briefings directly in Claude. METARs, TAFs, PIREPs, SIGMETs, and ICON-D2 NWP forecasts — no API key required.
 
-## Tools
+Just ask Claude things like:
+- "METAR EDDM"
+- "Preflight briefing EDLI"
+- "Route weather EDDM to LOWI"
+- "Any SIGMETs over Germany?"
 
-| Tool | Description |
-|------|-------------|
-| `wx_metar` | Current METAR for an airport (decoded) |
-| `wx_taf` | TAF forecast periods (decoded) |
-| `wx_pireps` | Recent PIREPs near an airport |
-| `wx_sigmets` | Active SIGMETs/AIRMETs (global/europe/germany) |
-| `wx_icon_d2` | Hourly ICON-D2 NWP forecast for any lat/lon |
-| `wx_preflight` | Composite VFR brief: METAR + TAF + ICON-D2 |
-| `wx_route` | Direct-route brief: METARs + ICON-D2 + SIGMETs |
+## Prerequisites
 
-## Data Sources
+You need two things installed:
 
-- **[aviationweather.gov](https://aviationweather.gov)** — METARs, TAFs, PIREPs, SIGMETs (FAA/NOAA)
-- **[Open-Meteo](https://open-meteo.com)** — ICON-D2 / ICON-EU NWP forecasts (DWD models, 2km resolution over Central Europe)
+1. **Claude Desktop** — download from https://claude.ai/download
+2. **Node.js** (version 18 or later) — download from https://nodejs.org (pick the LTS version)
 
-## Usage with Claude Desktop
+To check if Node.js is already installed, open Terminal (Mac) or Command Prompt (Windows) and type:
+```
+node --version
+```
+If you see a version number like `v22.x.x`, you're good to go.
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+## Setup (3 minutes)
+
+### Step 1: Open the Claude Desktop config
+
+1. Open **Claude Desktop**
+2. Click the **gear icon** (top right) to open Settings
+3. Go to **Developer**
+4. Click **Edit Config**
+
+This opens a JSON file in your text editor.
+
+### Step 2: Add the weather server
+
+If the file is empty or just has `{}`, replace it with:
 
 ```json
 {
@@ -34,7 +47,42 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop. The tools will be available immediately.
+If the file already has content (e.g. other MCP servers), add the `"aviation-weather"` block inside the existing `"mcpServers"` section.
+
+### Step 3: Restart Claude Desktop
+
+Quit Claude Desktop completely and reopen it. The first start may take 10-15 seconds longer while it downloads the weather server.
+
+### Step 4: Test it
+
+Start a new chat and ask: **"METAR EDDF"**
+
+Claude should respond with the current weather at Frankfurt airport. If it works, you're all set!
+
+## What can it do?
+
+| Ask Claude... | What it does |
+|---------------|-------------|
+| "METAR EDDM" | Current weather at Munich airport |
+| "TAF EDDF" | Forecast for Frankfurt |
+| "Preflight briefing EDLI" | Full VFR brief: METAR + TAF + NWP forecast |
+| "Route weather EDDM to LOWI" | Weather along a direct route (METARs + NWP + SIGMETs) |
+| "Any PIREPs near EDDK?" | Recent pilot reports near Cologne |
+| "SIGMETs over Germany" | Active significant weather warnings |
+| "Hourly forecast for 48.14, 11.57" | ICON-D2 NWP model data for any coordinates |
+
+## Data Sources
+
+- **[aviationweather.gov](https://aviationweather.gov)** — METARs, TAFs, PIREPs, SIGMETs (FAA/NOAA, worldwide)
+- **[Open-Meteo](https://open-meteo.com)** — ICON-D2 / ICON-EU NWP forecasts (DWD models)
+
+## Notes
+
+- Works worldwide for METARs, TAFs, PIREPs, and SIGMETs
+- ICON-D2 high-resolution forecasts (2km) cover Central Europe (43-58°N / 4-21°E, 48h horizon)
+- Outside Central Europe, it falls back to ICON-EU (7km resolution, 120h horizon)
+- ICAO codes are resolved automatically — just use the 4-letter code
+- Visibility is reported in km
 
 ## Usage with Claude Code
 
@@ -42,22 +90,13 @@ Restart Claude Desktop. The tools will be available immediately.
 claude mcp add aviation-weather -- npx -y aviation-weather-mcp
 ```
 
-## Manual Installation
+## Troubleshooting
 
-```bash
-git clone https://github.com/mariow/aviation-weather-mcp.git
-cd aviation-weather-mcp
-npm install
-npm run build
-node dist/index.js
-```
+**Claude doesn't show weather tools:** Make sure you restarted Claude Desktop after editing the config. Check that the JSON syntax is valid (no trailing commas, matching brackets).
 
-## Notes
+**"npx: command not found":** Node.js is not installed or not in your PATH. Download it from https://nodejs.org.
 
-- ICAO codes are resolved to coordinates via the authoritative aviationweather.gov station database
-- Visibility is reported in km
-- ICON-D2 coverage: Central Europe (43-58°N / 4-21°E), 48h horizon, 2km resolution
-- Outside ICON-D2 range, the server automatically falls back to ICON-EU (7km, 120h)
+**Slow first start:** The first time, `npx` downloads the package (~30KB). After that it's cached and starts instantly.
 
 ## License
 
