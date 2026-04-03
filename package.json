@@ -1,0 +1,42 @@
+{
+  "name": "aviation-weather-mcp",
+  "version": "1.0.0",
+  "description": "Aviation weather MCP server — METARs, TAFs, PIREPs, SIGMETs, ICON-D2 NWP forecasts. No API key required.",
+  "type": "module",
+  "bin": {
+    "aviation-weather-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "aviation",
+    "weather",
+    "metar",
+    "taf",
+    "pirep",
+    "sigmet",
+    "icon-d2",
+    "claude",
+    "model-context-protocol"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mariow/aviation-weather-mcp"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.10.0"
+  }
+}
