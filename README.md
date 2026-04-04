@@ -98,6 +98,10 @@ claude mcp add aviation-weather -- npx -y aviation-weather-mcp
 
 **Slow first start:** The first time, `npx` downloads the package (~30KB). After that it's cached and starts instantly.
 
+## Disclaimer
+
+This tool is for informational purposes only and is **not a replacement for an official pre-flight weather briefing**. Always use approved weather services and follow your national aviation authority's requirements for flight preparation.
+
 ## License
 
 MIT
