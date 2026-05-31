@@ -67,6 +67,7 @@ Claude should respond with the current weather at Frankfurt airport. If it works
 | "TAF EDDF" | Forecast for Frankfurt |
 | "Preflight briefing EDLI" | Full VFR brief: METAR + TAF + NWP forecast |
 | "Route weather EDDM to LOWI" | Weather along a direct route (METARs + NWP + SIGMETs) |
+| "Outlook for EDFE next week" | Per-day VFR go/no-go probability for the next 3–15 days |
 | "Any PIREPs near EDDK?" | Recent pilot reports near Cologne |
 | "SIGMETs over Germany" | Active significant weather warnings |
 | "Hourly forecast for 48.14, 11.57" | ICON-D2 NWP model data for any coordinates |
@@ -75,14 +76,17 @@ Claude should respond with the current weather at Frankfurt airport. If it works
 
 - **[aviationweather.gov](https://aviationweather.gov)** — METARs, TAFs, PIREPs, SIGMETs (FAA/NOAA, worldwide)
 - **[Open-Meteo](https://open-meteo.com)** — ICON-D2 / ICON-EU NWP forecasts (DWD models)
+- **[Open-Meteo Ensemble](https://open-meteo.com/en/docs/ensemble-api)** — ensemble forecasts (ECMWF-ENS, GEFS) for the long-range outlook
+- **[OurAirports](https://ourairports.com)** — bundled offline ICAO → coordinates database (~22k airports, incl. GA fields), Public Domain
 
 ## Notes
 
 - Works worldwide for METARs, TAFs, PIREPs, and SIGMETs
 - ICON-D2 high-resolution forecasts (2km) cover Central Europe (43-58°N / 4-21°E, 48h horizon)
 - Outside Central Europe, it falls back to ICON-EU (7km resolution, 120h horizon)
-- ICAO codes are resolved automatically — just use the 4-letter code
+- ICAO codes are resolved automatically — just use the 4-letter code. Resolution works **offline** from a bundled airport database, so even pure GA fields without a METAR (e.g. EDVY) work; you can also pass `lat`/`lon` directly
 - Visibility is reported in km
+- The 3–15 day outlook is a **coarse confidence measure** (share of ensemble members with poor VFR conditions), not a precise forecast — cloud base is approximated via low-cloud cover
 
 ## Usage with Claude Code
 
