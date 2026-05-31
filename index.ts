@@ -2,9 +2,10 @@
 /**
  * Aviation Weather MCP Server
  *
- * Provides aviation weather tools using two free, keyless APIs:
- *   - aviationweather.gov  — METARs, TAFs, PIREPs, SIGMETs
- *   - open-meteo.com       — ICON-D2 / ICON-EU NWP forecasts (DWD models)
+ * Provides aviation weather tools using free, keyless APIs:
+ *   - aviationweather.gov          — METARs, TAFs, PIREPs, SIGMETs
+ *   - open-meteo.com               — ICON-D2 / ICON-EU NWP forecasts (DWD models)
+ *   - ensemble-api.open-meteo.com  — ensemble forecasts (ECMWF-ENS, GEFS)
  *
  * Tools:
  *   wx_metar       — current METAR, decoded
@@ -12,16 +13,23 @@
  *   wx_pireps      — recent PIREPs near an airport
  *   wx_sigmets     — active SIGMETs/AIRMETs (global / europe / germany filter)
  *   wx_icon_d2     — hourly ICON-D2 NWP forecast for any lat/lon
+ *   wx_outlook     — 3–15 day ensemble VFR confidence outlook: per-day P(No-Go)
  *   wx_preflight   — composite VFR brief: METAR + TAF + ICON-D2
  *   wx_route       — direct-route brief: METARs + 5-point ICON-D2 + SIGMETs
  */
 
+import { readFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
 const AVWX_BASE = 'https://aviationweather.gov/api/data';
 const OPEN_METEO_BASE = 'https://api.open-meteo.com/v1';
+const ENSEMBLE_BASE = 'https://ensemble-api.open-meteo.com/v1';
+// Ensemble models for the outlook. In Open-Meteo's ensemble API only ECMWF-ENS provides
+// cloud_cover_low (51 mem, 15d); CAPE is also available from GEFS (31 mem, ~16d), so GEFS
+// widens the thunderstorm spread. ICON provides neither in the ensemble API, so it is omitted.
+const OUTLOOK_MODELS = 'ecmwf_ifs025,gfs025';
 
 function log(msg: string): void {
   console.error(`[AVWX] ${msg}`);
@@ -47,6 +55,17 @@ async function openMeteoFetch(params: Record<string, string>): Promise<unknown> 
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`Open-Meteo: HTTP ${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function ensembleFetch(params: Record<string, string>): Promise<unknown> {
+  const url = new URL(`${ENSEMBLE_BASE}/ensemble`);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  // Multi-model ensemble responses are large — allow a longer timeout than the other fetchers.
+  const res = await fetch(url.toString(), {
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`Open-Meteo Ensemble: HTTP ${res.status} ${res.statusText}`);
   return res.json();
 }
 
@@ -130,6 +149,14 @@ interface OpenMeteoResponse {
     weather_code?: (number | null)[];
     cloud_base?: (number | null)[];
   };
+}
+
+interface EnsembleResponse {
+  latitude?: number;
+  longitude?: number;
+  timezone?: string;
+  // Member series are dynamically named, e.g. "cloud_cover_low_member01_ecmwf_ifs025_ensemble".
+  hourly?: { time?: string[] } & Record<string, (number | null)[]>;
 }
 
 // ─── Utility functions ────────────────────────────────────────────────────────
@@ -303,18 +330,230 @@ function formatIconForecast(data: OpenMeteoResponse, hours: number, model: strin
   return `Model: ${model.toUpperCase()} | Lat ${data.latitude?.toFixed(2)} Lon ${data.longitude?.toFixed(2)}\n` + rows.join('\n');
 }
 
+// ─── Ensemble outlook helpers ───────────────────────────────────────────────
+
+// A member counts as No-Go for a day when at least this fraction of the daylight
+// hours are "bad" — a single bad hour shouldn't write off the whole day.
+const BAD_HOUR_FRACTION = 0.5;
+const OUTLOOK_WEEKDAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+
+interface DayOutlook {
+  date: string;            // local YYYY-MM-DD
+  pNoGo: number;           // 0..1
+  effectiveMembers: number;
+}
+
+interface DayTrend {
+  maxLowCloud: number | null;
+  maxCape: number | null;
+  precipSum: number | null;
+}
+
+/** Map each local day to the indices of its hours within [startHour, endHour). */
+function groupDaylightHours(time: string[], startHour: number, endHour: number): Map<string, number[]> {
+  const byDay = new Map<string, number[]>();
+  for (let i = 0; i < time.length; i++) {
+    const t = time[i]; // local ISO, e.g. "2026-06-07T08:00"
+    const hour = parseInt(t.slice(11, 13), 10);
+    if (isNaN(hour) || hour < startHour || hour >= endHour) continue;
+    const date = t.slice(0, 10);
+    const arr = byDay.get(date);
+    if (arr) arr.push(i); else byDay.set(date, [i]);
+  }
+  return byDay;
+}
+
+/**
+ * Suffixes identifying each member series for a variable. The control run has suffix ''
+ * (single-model) or e.g. '_ecmwf_ifs025_ensemble' (multi-model); members add '_memberNN'.
+ * The matching CAPE series for a member is `'cape' + suffix`.
+ */
+function enumerateMembers(hourly: Record<string, unknown>, varName: string): string[] {
+  const suffixes: string[] = [];
+  for (const key of Object.keys(hourly)) {
+    if (!key.startsWith(varName)) continue;
+    const sfx = key.slice(varName.length);
+    if (sfx === '' || sfx.startsWith('_')) suffixes.push(sfx);
+  }
+  return suffixes;
+}
+
+interface OutlookResult {
+  days: DayOutlook[];
+  cloudMembers: number; // members with any non-null low-cloud data (ECMWF-ENS)
+  capeMembers: number;  // members with any non-null CAPE data (ECMWF-ENS + GEFS)
+  usableMembers: number; // members contributing to the verdict (non-null cloud OR cape)
+}
+
+/** Per-day P(No-Go) from the pooled ensemble, plus how many members actually contribute. */
+function computeOutlook(
+  ens: EnsembleResponse,
+  startHour: number, endHour: number,
+  cloudThreshold: number, capeThreshold: number,
+): OutlookResult {
+  const empty: OutlookResult = { days: [], cloudMembers: 0, capeMembers: 0, usableMembers: 0 };
+  const h = ens.hourly;
+  if (!h?.time?.length) return empty;
+  const byDay = groupDaylightHours(h.time, startHour, endHour);
+  const suffixes = enumerateMembers(h, 'cloud_cover_low');
+
+  // A model may return a member's series entirely null (variable not provided by that model).
+  // Count members by what they actually contribute so the report doesn't overstate the pool.
+  let cloudMembers = 0;
+  let capeMembers = 0;
+  let usableMembers = 0;
+  for (const sfx of suffixes) {
+    const cloud = h['cloud_cover_low' + sfx];
+    const cape = h['cape' + sfx];
+    const hasCloud = !!cloud && cloud.some(v => v != null);
+    const hasCape = !!cape && cape.some(v => v != null);
+    if (hasCloud) cloudMembers++;
+    if (hasCape) capeMembers++;
+    if (hasCloud || hasCape) usableMembers++;
+  }
+
+  const days: DayOutlook[] = [];
+  for (const [date, idxs] of byDay) {
+    let noGo = 0;
+    let effective = 0;
+    for (const sfx of suffixes) {
+      const cloud = h['cloud_cover_low' + sfx];
+      const cape = h['cape' + sfx];
+      if (!cloud) continue;
+      let badHours = 0;
+      let validHours = 0;
+      for (const i of idxs) {
+        const c = cloud[i];
+        const cp = cape?.[i];
+        if (c == null && cp == null) continue; // hour outside this member's model horizon
+        validHours++;
+        if ((c != null && c > cloudThreshold) || (cp != null && cp > capeThreshold)) badHours++;
+      }
+      if (validHours === 0) continue; // member doesn't reach this day
+      effective++;
+      if (badHours / validHours >= BAD_HOUR_FRACTION) noGo++;
+    }
+    if (effective === 0) continue;
+    days.push({ date, pNoGo: noGo / effective, effectiveMembers: effective });
+  }
+  days.sort((a, b) => a.date.localeCompare(b.date));
+  return { days, cloudMembers, capeMembers, usableMembers };
+}
+
+/** Aggregate the deterministic ECMWF-IFS run per day within the daylight window. */
+function computeDeterministicTrend(data: OpenMeteoResponse, startHour: number, endHour: number): Map<string, DayTrend> {
+  const out = new Map<string, DayTrend>();
+  const h = data.hourly;
+  if (!h?.time?.length) return out;
+  const byDay = groupDaylightHours(h.time, startHour, endHour);
+  for (const [date, idxs] of byDay) {
+    let maxLow: number | null = null;
+    let maxCape: number | null = null;
+    let precip = 0;
+    let hasPrecip = false;
+    for (const i of idxs) {
+      const c = h.cloud_cover_low?.[i];
+      const cp = h.cape?.[i];
+      const pr = h.precipitation?.[i];
+      if (c != null) maxLow = maxLow == null ? c : Math.max(maxLow, c);
+      if (cp != null) maxCape = maxCape == null ? cp : Math.max(maxCape, cp);
+      if (pr != null) { precip += pr; hasPrecip = true; }
+    }
+    out.set(date, { maxLowCloud: maxLow, maxCape, precipSum: hasPrecip ? precip : null });
+  }
+  return out;
+}
+
+function noGoCategory(p: number): string {
+  if (p < 0.25) return '✅ GO-likely';
+  if (p <= 0.60) return '⚠️ MARGINAL';
+  return '⛔ NO-GO-likely';
+}
+
+function formatOutlook(
+  result: OutlookResult,
+  trend: Map<string, DayTrend>,
+  coordsLabel: string,
+  startHour: number, endHour: number,
+  cloudThreshold: number, capeThreshold: number,
+): string {
+  const { days, cloudMembers, capeMembers, usableMembers } = result;
+  if (days.length === 0) return 'No ensemble data available for the requested window.';
+  const win = `${String(startHour).padStart(2, '0')}–${String(endHour).padStart(2, '0')} LT`;
+  const header = `Outlook ${coordsLabel} | window ${win} | No-Go if low-cloud >${cloudThreshold}% or CAPE >${capeThreshold} J/kg`;
+
+  const rows = days.map(d => {
+    const wd = OUTLOOK_WEEKDAYS[new Date(d.date + 'T12:00:00Z').getUTCDay()];
+    const dm = `${d.date.slice(8, 10)}.${d.date.slice(5, 7)}`;
+    const pct = String(Math.round(d.pNoGo * 100)).padStart(3);
+    const cat = noGoCategory(d.pNoGo).padEnd(14);
+    const t = trend.get(d.date);
+    const det = t
+      ? `det: lowcld ${t.maxLowCloud != null ? Math.round(t.maxLowCloud) + '%' : '?'} · CAPE ${t.maxCape != null ? Math.round(t.maxCape) : '?'} · ${t.precipSum != null ? t.precipSum.toFixed(1) + 'mm' : '?'}`
+      : 'det: n/a';
+    return `${wd} ${dm}  P(No-Go) ${pct}%  ${cat} | ${det} | ${d.effectiveMembers} mem`;
+  });
+
+  const footer = [
+    '',
+    `Contributing members: ${usableMembers} (low-cloud from ECMWF-ENS ×${cloudMembers}; CAPE from ECMWF-ENS+GEFS ×${capeMembers}). Deterministic trend: ECMWF-IFS.`,
+    'Note: cloud base is approximated via low-cloud cover; precipitation is shown for context only (not a No-Go trigger).',
+    'Member count shrinks toward the end of the horizon as shorter-range models drop out.',
+    'This is a coarse confidence measure for planning — not a substitute for an official pre-flight briefing.',
+  ];
+  return [header, '', ...rows, ...footer].join('\n');
+}
+
 // ─── Coordinate helpers ───────────────────────────────────────────────────────
 
 interface Coords { lat: number; lon: number; name: string }
 
+// Bundled offline ICAO → [lat, lon, name] database (OurAirports, Public Domain).
+// Covers ~22k airports worldwide including pure GA fields, so coordinate resolution
+// does not depend on any external endpoint staying up. Generated by scripts/build-airports.mjs.
+type AirportEntry = [number, number, string];
+let AIRPORTS: Record<string, AirportEntry> = {};
+try {
+  AIRPORTS = JSON.parse(readFileSync(new URL('../data/airports.json', import.meta.url), 'utf8')) as Record<string, AirportEntry>;
+  log(`Loaded ${Object.keys(AIRPORTS).length} airports from bundled database`);
+} catch (err) {
+  log(`Bundled airport database unavailable: ${err instanceof Error ? err.message : String(err)}`);
+}
+
+/** Resolve an ICAO code from the bundled OurAirports database (offline). */
+function lookupAirport(icao: string): Coords | null {
+  const e = AIRPORTS[icao.toUpperCase()];
+  return e ? { lat: e[0], lon: e[1], name: e[2] || icao.toUpperCase() } : null;
+}
+
+/**
+ * Resolve airport coordinates. The bundled database is authoritative and covers GA fields;
+ * the aviationweather.gov airport endpoint is a fallback for very new/missing entries.
+ */
 async function getStationCoords(icao: string): Promise<Coords | null> {
+  const code = icao.toUpperCase();
+  const local = lookupAirport(code);
+  if (local) return local;
   try {
-    const data = await avwxFetch('station', { ids: icao.toUpperCase(), format: 'json' }) as StationData[];
+    const data = await avwxFetch('airport', { ids: code, format: 'json' }) as StationData[];
+    if (Array.isArray(data) && data.length > 0 && data[0].lat != null && data[0].lon != null) {
+      return { lat: data[0].lat, lon: data[0].lon, name: data[0].name || code };
+    }
+  } catch (err) {
+    log(`Airport lookup failed for ${code}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return null;
+}
+
+/** Fallback coordinate source: extract lat/lon from the station's latest METAR. */
+async function getMetarCoords(icao: string): Promise<Coords | null> {
+  try {
+    const data = await avwxFetch('metar', { ids: icao.toUpperCase(), format: 'json', taf: 'false', hours: '3' }) as MetarData[];
     if (Array.isArray(data) && data.length > 0 && data[0].lat != null && data[0].lon != null) {
       return { lat: data[0].lat, lon: data[0].lon, name: data[0].name || icao };
     }
   } catch (err) {
-    log(`Station lookup failed for ${icao}: ${err instanceof Error ? err.message : String(err)}`);
+    log(`METAR coord lookup failed for ${icao}: ${err instanceof Error ? err.message : String(err)}`);
   }
   return null;
 }
@@ -480,6 +719,84 @@ server.tool(
     } catch (err) {
       return { content: [{ type: 'text' as const, text: `ICON-D2 fetch failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
     }
+  },
+);
+
+// ─── wx_outlook ──────────────────────────────────────────────────────────────
+
+server.tool(
+  'wx_outlook',
+  'Longer-range VFR confidence outlook (3–15 days) for an airfield or location. Pools an ensemble (ECMWF-ENS for low cloud; ECMWF-ENS + GEFS for CAPE) and reports, per day, the probability that the day is NO-GO — the share of ensemble members with poor VFR conditions (low cloud above threshold OR high CAPE/thunderstorm potential) during the daylight window. Also shows the deterministic ECMWF-IFS trend alongside. This is the confidence measure for trip planning that short-range METAR/TAF/ICON-D2 cannot provide. Pass an ICAO code (resolved offline from a bundled airport database covering GA fields) or lat/lon directly.',
+  {
+    icao: z.string().optional().describe('4-letter ICAO airport code (preferred; coords resolved from the station DB). Provide this OR lat+lon.'),
+    lat: z.number().optional().describe('Latitude in decimal degrees (alternative to icao)'),
+    lon: z.number().optional().describe('Longitude in decimal degrees (alternative to icao)'),
+    days: z.number().optional().describe('Forecast horizon in days, 3–15 (default: 7)'),
+    start_hour: z.number().optional().describe('Daylight window start, local hour 0–23 (default: 8)'),
+    end_hour: z.number().optional().describe('Daylight window end, local hour 1–24 (default: 18)'),
+    cloud_threshold: z.number().optional().describe('Low-cloud cover % that counts as No-Go (default: 50)'),
+    cape_threshold: z.number().optional().describe('CAPE J/kg that counts as No-Go / thunderstorm potential (default: 1000)'),
+  },
+  async (args) => {
+    const days = Math.min(Math.max(Math.round(args.days ?? 7), 3), 15);
+    const startHour = Math.min(Math.max(Math.round(args.start_hour ?? 8), 0), 23);
+    const endHour = Math.min(Math.max(Math.round(args.end_hour ?? 18), startHour + 1), 24);
+    const cloudThreshold = args.cloud_threshold ?? 50;
+    const capeThreshold = args.cape_threshold ?? 1000;
+
+    // Resolve coordinates: ICAO is authoritative, lat/lon is the fallback.
+    let lat = args.lat;
+    let lon = args.lon;
+    let label: string;
+    if (args.icao) {
+      const icao = args.icao.toUpperCase();
+      // Bundled airport DB (covers GA fields) → airport endpoint → METAR coords.
+      const coords = (await getStationCoords(icao)) ?? (await getMetarCoords(icao));
+      if (!coords) {
+        return { content: [{ type: 'text' as const, text: `Could not resolve coordinates for ${icao}. Verify the ICAO code, or pass lat/lon directly.` }], isError: true };
+      }
+      lat = coords.lat; lon = coords.lon;
+      label = `${icao} (${lat.toFixed(2)}N ${lon.toFixed(2)}E)`;
+    } else if (lat != null && lon != null) {
+      label = `${lat.toFixed(2)}N ${lon.toFixed(2)}E`;
+    } else {
+      return { content: [{ type: 'text' as const, text: 'Provide either an ICAO code (icao) or coordinates (lat and lon).' }], isError: true };
+    }
+
+    log(`Outlook ${label} +${days}d window ${startHour}-${endHour}`);
+
+    const [ensResult, detResult] = await Promise.allSettled([
+      ensembleFetch({
+        latitude: String(lat),
+        longitude: String(lon),
+        hourly: 'cloud_cover_low,cape',
+        models: OUTLOOK_MODELS,
+        forecast_days: String(days),
+        timezone: 'auto',
+      }) as Promise<EnsembleResponse>,
+      openMeteoFetch({
+        latitude: String(lat),
+        longitude: String(lon),
+        hourly: 'cloud_cover_low,cape,precipitation',
+        models: 'ecmwf_ifs025',
+        forecast_days: String(days),
+        timezone: 'auto',
+      }) as Promise<OpenMeteoResponse>,
+    ]);
+
+    if (ensResult.status !== 'fulfilled') {
+      const err = ensResult.reason;
+      return { content: [{ type: 'text' as const, text: `Ensemble outlook fetch failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+
+    const outlook = computeOutlook(ensResult.value, startHour, endHour, cloudThreshold, capeThreshold);
+    const trend = detResult.status === 'fulfilled'
+      ? computeDeterministicTrend(detResult.value, startHour, endHour)
+      : new Map<string, DayTrend>();
+
+    const text = `# VFR Outlook — ${label}\nGenerated: ${new Date().toUTCString()}\n\n`
+      + formatOutlook(outlook, trend, label, startHour, endHour, cloudThreshold, capeThreshold);
+    return { content: [{ type: 'text' as const, text }] };
   },
 );
 
