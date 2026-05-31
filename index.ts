@@ -161,7 +161,7 @@ interface EnsembleResponse {
 
 // ─── Utility functions ────────────────────────────────────────────────────────
 
-function parseVisibSM(visib: string | number | undefined): number {
+export function parseVisibSM(visib: string | number | undefined): number {
   if (visib == null) return 10;
   if (typeof visib === 'number') return visib;
   if (visib === '10+' || visib === 'P6SM') return 10;
@@ -175,7 +175,7 @@ function parseVisibSM(visib: string | number | undefined): number {
   return isNaN(num) ? 10 : num;
 }
 
-function flightCategory(visib: string | number | undefined, ceil: number | undefined | null): string {
+export function flightCategory(visib: string | number | undefined, ceil: number | undefined | null): string {
   const visSM = parseVisibSM(visib);
   const ceilFt = ceil != null ? ceil * 100 : Infinity;
   if (visSM < 1 || ceilFt < 500) return 'LIFR';
@@ -184,19 +184,19 @@ function flightCategory(visib: string | number | undefined, ceil: number | undef
   return 'VFR';
 }
 
-function visToKm(visib: string | number | undefined): string {
+export function visToKm(visib: string | number | undefined): string {
   const sm = parseVisibSM(visib);
   const km = sm * 1.60934;
   return km >= 10 ? '>10km' : `${km.toFixed(1)}km`;
 }
 
-function windStr(wdir: number | string | undefined, wspd: number | undefined, wgst: number | undefined): string {
+export function windStr(wdir: number | string | undefined, wspd: number | undefined, wgst: number | undefined): string {
   if (wspd == null) return '---';
   const dir = (wdir === 0 || wdir === '0' || wdir === 'VRB') ? 'VRB' : `${String(wdir).padStart(3, '0')}°`;
   return `${dir}/${wspd}kt${wgst ? ` G${wgst}kt` : ''}`;
 }
 
-function cloudStr(m: { cldCvg1?: string; cldBas1?: number; cldCvg2?: string; cldBas2?: number; cldCvg3?: string; cldBas3?: number; cldCvg4?: string; cldBas4?: number; vertVis?: number }): string {
+export function cloudStr(m: { cldCvg1?: string; cldBas1?: number; cldCvg2?: string; cldBas2?: number; cldCvg3?: string; cldBas3?: number; cldCvg4?: string; cldBas4?: number; vertVis?: number }): string {
   if (m.vertVis != null) return `VV${m.vertVis * 100}ft`;
   const layers: string[] = [];
   for (const [cvg, bas] of [[m.cldCvg1, m.cldBas1], [m.cldCvg2, m.cldBas2], [m.cldCvg3, m.cldBas3], [m.cldCvg4, m.cldBas4]] as [string | undefined, number | undefined][]) {
@@ -208,7 +208,7 @@ function cloudStr(m: { cldCvg1?: string; cldBas1?: number; cldCvg2?: string; cld
   return layers.length > 0 ? layers.join(', ') : 'SKC';
 }
 
-function wmoDesc(code: number | null): string {
+export function wmoDesc(code: number | null): string {
   if (code == null) return '';
   if (code === 0) return 'Clear';
   if (code <= 3) return 'Partly cloudy';
@@ -225,7 +225,7 @@ function wmoDesc(code: number | null): string {
   return `WMO${code}`;
 }
 
-function formatMetar(m: MetarData): string {
+export function formatMetar(m: MetarData): string {
   const cat = m.fltcat || flightCategory(m.visib, m.ceil);
   const lines = [
     `**${m.icaoId || '?'}**${m.name ? ` (${m.name})` : ''} — Category: **${cat}**`,
@@ -249,12 +249,12 @@ function formatTafPeriod(f: TafForecast, label: string): string {
 }
 
 /** Returns true when coordinates are within ICON-D2 coverage area. */
-function inIconD2Coverage(lat: number, lon: number): boolean {
+export function inIconD2Coverage(lat: number, lon: number): boolean {
   return lat >= 43 && lat <= 58 && lon >= -4 && lon <= 21;
 }
 
 /** Choose best available DWD model for a location. */
-function selectModel(lat: number, lon: number): string {
+export function selectModel(lat: number, lon: number): string {
   if (inIconD2Coverage(lat, lon)) return 'icon_d2';
   // ICON-EU covers all of Europe
   if (lat >= 30 && lat <= 73 && lon >= -28 && lon <= 48) return 'icon_eu';
@@ -350,7 +350,7 @@ interface DayTrend {
 }
 
 /** Map each local day to the indices of its hours within [startHour, endHour). */
-function groupDaylightHours(time: string[], startHour: number, endHour: number): Map<string, number[]> {
+export function groupDaylightHours(time: string[], startHour: number, endHour: number): Map<string, number[]> {
   const byDay = new Map<string, number[]>();
   for (let i = 0; i < time.length; i++) {
     const t = time[i]; // local ISO, e.g. "2026-06-07T08:00"
@@ -368,7 +368,7 @@ function groupDaylightHours(time: string[], startHour: number, endHour: number):
  * (single-model) or e.g. '_ecmwf_ifs025_ensemble' (multi-model); members add '_memberNN'.
  * The matching CAPE series for a member is `'cape' + suffix`.
  */
-function enumerateMembers(hourly: Record<string, unknown>, varName: string): string[] {
+export function enumerateMembers(hourly: Record<string, unknown>, varName: string): string[] {
   const suffixes: string[] = [];
   for (const key of Object.keys(hourly)) {
     if (!key.startsWith(varName)) continue;
@@ -386,7 +386,7 @@ interface OutlookResult {
 }
 
 /** Per-day P(No-Go) from the pooled ensemble, plus how many members actually contribute. */
-function computeOutlook(
+export function computeOutlook(
   ens: EnsembleResponse,
   startHour: number, endHour: number,
   cloudThreshold: number, capeThreshold: number,
@@ -441,7 +441,7 @@ function computeOutlook(
 }
 
 /** Aggregate the deterministic ECMWF-IFS run per day within the daylight window. */
-function computeDeterministicTrend(data: OpenMeteoResponse, startHour: number, endHour: number): Map<string, DayTrend> {
+export function computeDeterministicTrend(data: OpenMeteoResponse, startHour: number, endHour: number): Map<string, DayTrend> {
   const out = new Map<string, DayTrend>();
   const h = data.hourly;
   if (!h?.time?.length) return out;
@@ -464,7 +464,7 @@ function computeDeterministicTrend(data: OpenMeteoResponse, startHour: number, e
   return out;
 }
 
-function noGoCategory(p: number): string {
+export function noGoCategory(p: number): string {
   if (p < 0.25) return '✅ GO-likely';
   if (p <= 0.60) return '⚠️ MARGINAL';
   return '⛔ NO-GO-likely';
@@ -521,7 +521,7 @@ try {
 }
 
 /** Resolve an ICAO code from the bundled OurAirports database (offline). */
-function lookupAirport(icao: string): Coords | null {
+export function lookupAirport(icao: string): Coords | null {
   const e = AIRPORTS[icao.toUpperCase()];
   return e ? { lat: e[0], lon: e[1], name: e[2] || icao.toUpperCase() } : null;
 }
@@ -558,7 +558,7 @@ async function getMetarCoords(icao: string): Promise<Coords | null> {
   return null;
 }
 
-function lerp(a: number, b: number, t: number): number { return a + (b - a) * t; }
+export function lerp(a: number, b: number, t: number): number { return a + (b - a) * t; }
 
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 
@@ -1027,5 +1027,10 @@ server.tool(
 
 // ─── Connect ──────────────────────────────────────────────────────────────────
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// Only start the stdio server when run directly (e.g. `node dist/index.js`).
+// When imported — e.g. by the unit tests — skip startup so the pure helpers can
+// be exercised without opening a transport.
+if (import.meta.main) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
