@@ -49,25 +49,39 @@ async function avwxFetch(endpoint: string, params: Record<string, string>): Prom
   return res.json();
 }
 
+/**
+ * Fetch JSON with a timeout, converting network/timeout failures into a clear,
+ * host-named error. A bare AbortSignal timeout otherwise surfaces as an opaque
+ * "operation was aborted", which hides *which* host is unreachable — and the
+ * outlook talks to two different Open-Meteo hosts (api vs ensemble-api), so a
+ * firewall/proxy blocking one of them must be diagnosable from the message.
+ */
+async function fetchJson(url: string, host: string, timeoutMs: number): Promise<unknown> {
+  let res: Response;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err) {
+    const name = err instanceof Error ? err.name : '';
+    if (name === 'TimeoutError' || name === 'AbortError') {
+      throw new Error(`${host} did not respond within ${timeoutMs / 1000}s — host unreachable? Check firewall/proxy access to ${host}.`);
+    }
+    throw new Error(`${host} request failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!res.ok) throw new Error(`${host}: HTTP ${res.status} ${res.statusText}`);
+  return res.json();
+}
+
 async function openMeteoFetch(params: Record<string, string>): Promise<unknown> {
   const url = new URL(`${OPEN_METEO_BASE}/forecast`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  const res = await fetch(url.toString(), {
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!res.ok) throw new Error(`Open-Meteo: HTTP ${res.status} ${res.statusText}`);
-  return res.json();
+  return fetchJson(url.toString(), 'api.open-meteo.com', 10_000);
 }
 
 async function ensembleFetch(params: Record<string, string>): Promise<unknown> {
   const url = new URL(`${ENSEMBLE_BASE}/ensemble`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   // Multi-model ensemble responses are large — allow a longer timeout than the other fetchers.
-  const res = await fetch(url.toString(), {
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (!res.ok) throw new Error(`Open-Meteo Ensemble: HTTP ${res.status} ${res.statusText}`);
-  return res.json();
+  return fetchJson(url.toString(), 'ensemble-api.open-meteo.com', 20_000);
 }
 
 // ─── Type definitions ─────────────────────────────────────────────────────────
@@ -135,6 +149,7 @@ interface OpenMeteoResponse {
   latitude?: number;
   longitude?: number;
   timezone?: string;
+  elevation?: number; // model terrain elevation in metres (for AGL conversion)
   hourly?: {
     time?: string[];
     visibility?: (number | null)[];
@@ -148,6 +163,9 @@ interface OpenMeteoResponse {
     precipitation?: (number | null)[];
     cape?: (number | null)[];
     weather_code?: (number | null)[];
+    // Pressure-level cloud cover + geopotential height for deriving a cloud ceiling.
+    [key: `cloud_cover_${number}hPa`]: (number | null)[] | undefined;
+    [key: `geopotential_height_${number}hPa`]: (number | null)[] | undefined;
   };
 }
 
@@ -261,6 +279,15 @@ export function selectModel(lat: number, lon: number): string {
   return 'icon_seamless';
 }
 
+// Open-Meteo serves no usable cloud_base/cloud_top. Instead we derive a cloud ceiling
+// from pressure-level cloud cover + geopotential height: the lowest level with a
+// broken/overcast deck (≥ CEILING_COVER_PCT). Low levels are spaced ~700ft apart in
+// the VFR-critical band, which is coarse but usable. Capped at 700 hPa (~9000ft AGL) —
+// above that there is no VFR ceiling concern.
+const CEILING_LEVELS_HPA = [1000, 975, 950, 925, 900, 850, 800, 700];
+const CEILING_COVER_PCT = 50; // ≥ this cloud cover at a level counts as a ceiling (BKN/OVC)
+const CEILING_VARIABLES = CEILING_LEVELS_HPA.flatMap(l => [`cloud_cover_${l}hPa`, `geopotential_height_${l}hPa`]);
+
 const ICON_D2_VARIABLES = [
   'visibility',
   'cloud_cover_low',
@@ -273,7 +300,45 @@ const ICON_D2_VARIABLES = [
   'precipitation',
   'cape',
   'weather_code',
+  ...CEILING_VARIABLES,
 ].join(',');
+
+type CeilingResult =
+  | { kind: 'ceiling'; ft: number }   // lowest BKN/OVC deck, ft AGL
+  | { kind: 'none'; belowFt: number } // no deck found up to belowFt AGL
+  | { kind: 'nodata' };               // pressure data missing — ceiling unknown
+
+/**
+ * Derive the cloud ceiling (lowest broken/overcast deck) for one hour from
+ * pressure-level cloud cover + geopotential height, returned as ft AGL.
+ * Critically distinguishes "no deck" from "no data" so a missing ceiling never
+ * masquerades as clear skies.
+ */
+export function deriveCeiling(data: OpenMeteoResponse, i: number): CeilingResult {
+  const h = data.hourly;
+  const elevM = data.elevation;
+  if (!h || elevM == null) return { kind: 'nodata' };
+  let anyData = false;
+  let belowFt = 0;
+  for (const lvl of CEILING_LEVELS_HPA) {
+    const cc = h[`cloud_cover_${lvl}hPa`]?.[i];
+    const gh = h[`geopotential_height_${lvl}hPa`]?.[i];
+    if (cc == null || gh == null) continue;
+    anyData = true;
+    const aglFt = Math.round((gh - elevM) * 3.281);
+    if (aglFt > 0) belowFt = aglFt; // highest level we actually checked (AGL)
+    if (cc >= CEILING_COVER_PCT && aglFt > 0) return { kind: 'ceiling', ft: aglFt };
+  }
+  return anyData ? { kind: 'none', belowFt } : { kind: 'nodata' };
+}
+
+export function ceilingStr(c: CeilingResult): string {
+  switch (c.kind) {
+    case 'ceiling': return `ceil ~${c.ft}ft`;
+    case 'none': return `ceil none<${c.belowFt}ft`;
+    case 'nodata': return 'ceil n/a';
+  }
+}
 
 function formatIconForecast(data: OpenMeteoResponse, hours: number, model: string): string {
   const h = data.hourly;
@@ -300,20 +365,25 @@ function formatIconForecast(data: OpenMeteoResponse, hours: number, model: strin
     const windKt = windSpd != null ? Math.round(windSpd / 1.852) : null;
     const wind80Kt = windSpd80 != null ? Math.round(windSpd80 / 1.852) : null;
 
-    // Estimate category from visibility only. Open-Meteo does not currently serve a
-    // usable cloud base (cloud_base returns null for every model), so ceiling cannot
-    // be derived here — low-cloud cover % below is the VFR proxy for the ceiling side.
+    // Ceiling derived from pressure-level cloud cover (Open-Meteo has no usable
+    // cloud_base). A 'ceiling' counts toward the category; 'none' means no deck below
+    // ~9000ft (VFR ceiling-wise); 'nodata' means unknown — the category then can't
+    // account for ceiling, so we mark it with '?' rather than implying clear skies.
+    const ceiling = deriveCeiling(data, i);
+    const ceilFtForCat = ceiling.kind === 'ceiling' ? ceiling.ft : Infinity;
     const visSMNum = vis != null ? vis / 1609.34 : 10;
     let cat = 'VFR';
-    if (visSMNum < 1) cat = 'LIFR';
-    else if (visSMNum < 3) cat = 'IFR';
-    else if (visSMNum <= 5) cat = 'MVFR';
+    if (visSMNum < 1 || ceilFtForCat < 500) cat = 'LIFR';
+    else if (visSMNum < 3 || ceilFtForCat < 1000) cat = 'IFR';
+    else if (visSMNum <= 5 || ceilFtForCat <= 3000) cat = 'MVFR';
+    if (ceiling.kind === 'nodata' && cat === 'VFR') cat = 'VFR?'; // ceiling unknown — not confirmed VFR
 
     const parts = [
       t.toISOString().slice(5, 16).replace('T', ' ') + 'Z',
       cat,
       windKt != null ? `${String(Math.round(windDir ?? 0)).padStart(3, '0')}/${windKt}kt` : '',
       `vis ${visKm}`,
+      ceilingStr(ceiling),
       cloudLow != null ? `low cld ${cloudLow}%` : '',
       precip != null && precip > 0 ? `precip ${precip.toFixed(1)}mm` : '',
       cape != null && cape > 500 ? `⚠ CAPE ${Math.round(cape)}` : '',
@@ -999,6 +1069,7 @@ server.tool(
         hourly: [
           'visibility', 'cloud_cover_low', 'wind_speed_10m', 'wind_direction_10m',
           'wind_speed_80m', 'wind_direction_80m', 'precipitation', 'cape', 'weather_code',
+          ...CEILING_VARIABLES,
         ].join(','),
         models: selectModel(pt.lat, pt.lon),
         forecast_hours: String(Math.min(horizon + enrouteHours + 2, 48)),
