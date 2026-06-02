@@ -19,6 +19,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -147,7 +148,6 @@ interface OpenMeteoResponse {
     precipitation?: (number | null)[];
     cape?: (number | null)[];
     weather_code?: (number | null)[];
-    cloud_base?: (number | null)[];
   };
 }
 
@@ -273,7 +273,6 @@ const ICON_D2_VARIABLES = [
   'precipitation',
   'cape',
   'weather_code',
-  'cloud_base',
 ].join(',');
 
 function formatIconForecast(data: OpenMeteoResponse, hours: number, model: string): string {
@@ -290,8 +289,6 @@ function formatIconForecast(data: OpenMeteoResponse, hours: number, model: strin
 
     const vis = h.visibility?.[i];
     const visKm = vis != null ? (vis >= 10000 ? '>10km' : `${(vis / 1000).toFixed(1)}km`) : '?';
-    const cloudBase = h.cloud_base?.[i]; // metres
-    const cloudBaseFt = cloudBase != null ? Math.round(cloudBase * 3.281) : null;
     const cloudLow = h.cloud_cover_low?.[i];
     const windSpd = h.wind_speed_10m?.[i]; // km/h → kt
     const windDir = h.wind_direction_10m?.[i];
@@ -303,19 +300,20 @@ function formatIconForecast(data: OpenMeteoResponse, hours: number, model: strin
     const windKt = windSpd != null ? Math.round(windSpd / 1.852) : null;
     const wind80Kt = windSpd80 != null ? Math.round(windSpd80 / 1.852) : null;
 
-    // Estimate category (thresholds in SM, convert from metres)
+    // Estimate category from visibility only. Open-Meteo does not currently serve a
+    // usable cloud base (cloud_base returns null for every model), so ceiling cannot
+    // be derived here — low-cloud cover % below is the VFR proxy for the ceiling side.
     const visSMNum = vis != null ? vis / 1609.34 : 10;
     let cat = 'VFR';
-    if (visSMNum < 1 || (cloudBaseFt != null && cloudBaseFt < 500)) cat = 'LIFR';
-    else if (visSMNum < 3 || (cloudBaseFt != null && cloudBaseFt < 1000)) cat = 'IFR';
-    else if (visSMNum <= 5 || (cloudBaseFt != null && cloudBaseFt <= 3000)) cat = 'MVFR';
+    if (visSMNum < 1) cat = 'LIFR';
+    else if (visSMNum < 3) cat = 'IFR';
+    else if (visSMNum <= 5) cat = 'MVFR';
 
     const parts = [
       t.toISOString().slice(5, 16).replace('T', ' ') + 'Z',
       cat,
       windKt != null ? `${String(Math.round(windDir ?? 0)).padStart(3, '0')}/${windKt}kt` : '',
       `vis ${visKm}`,
-      cloudBaseFt != null ? `base ~${cloudBaseFt}ft` : '',
       cloudLow != null ? `low cld ${cloudLow}%` : '',
       precip != null && precip > 0 ? `precip ${precip.toFixed(1)}mm` : '',
       cape != null && cape > 500 ? `⚠ CAPE ${Math.round(cape)}` : '',
@@ -470,9 +468,19 @@ export function noGoCategory(p: number): string {
   return '⛔ NO-GO-likely';
 }
 
+/** Compact one-line summary of a deterministic day aggregate. */
+function trendStr(t: DayTrend | undefined): string {
+  if (!t) return '—';
+  const lc = t.maxLowCloud != null ? Math.round(t.maxLowCloud) + '%' : '?';
+  const cp = t.maxCape != null ? Math.round(t.maxCape) : '?';
+  const pr = t.precipSum != null ? t.precipSum.toFixed(1) + 'mm' : '?';
+  return `lowcld ${lc} · CAPE ${cp} · ${pr}`;
+}
+
 function formatOutlook(
   result: OutlookResult,
-  trend: Map<string, DayTrend>,
+  ecmwfTrend: Map<string, DayTrend>,
+  iconEuTrend: Map<string, DayTrend>,
   coordsLabel: string,
   startHour: number, endHour: number,
   cloudThreshold: number, capeThreshold: number,
@@ -481,23 +489,23 @@ function formatOutlook(
   if (days.length === 0) return 'No ensemble data available for the requested window.';
   const win = `${String(startHour).padStart(2, '0')}–${String(endHour).padStart(2, '0')} LT`;
   const header = `Outlook ${coordsLabel} | window ${win} | No-Go if low-cloud >${cloudThreshold}% or CAPE >${capeThreshold} J/kg`;
+  const hasEu = iconEuTrend.size > 0;
 
   const rows = days.map(d => {
     const wd = OUTLOOK_WEEKDAYS[new Date(d.date + 'T12:00:00Z').getUTCDay()];
     const dm = `${d.date.slice(8, 10)}.${d.date.slice(5, 7)}`;
     const pct = String(Math.round(d.pNoGo * 100)).padStart(3);
     const cat = noGoCategory(d.pNoGo).padEnd(14);
-    const t = trend.get(d.date);
-    const det = t
-      ? `det: lowcld ${t.maxLowCloud != null ? Math.round(t.maxLowCloud) + '%' : '?'} · CAPE ${t.maxCape != null ? Math.round(t.maxCape) : '?'} · ${t.precipSum != null ? t.precipSum.toFixed(1) + 'mm' : '?'}`
-      : 'det: n/a';
-    return `${wd} ${dm}  P(No-Go) ${pct}%  ${cat} | ${det} | ${d.effectiveMembers} mem`;
+    const ecmwf = `ecmwf: ${trendStr(ecmwfTrend.get(d.date))}`;
+    const eu = hasEu ? ` | icon-eu: ${trendStr(iconEuTrend.get(d.date))}` : '';
+    return `${wd} ${dm}  P(No-Go) ${pct}%  ${cat} | ${ecmwf}${eu} | ${d.effectiveMembers} mem`;
   });
 
   const footer = [
     '',
-    `Contributing members: ${usableMembers} (low-cloud from ECMWF-ENS ×${cloudMembers}; CAPE from ECMWF-ENS+GEFS ×${capeMembers}). Deterministic trend: ECMWF-IFS.`,
-    'Note: cloud base is approximated via low-cloud cover; precipitation is shown for context only (not a No-Go trigger).',
+    `Contributing members: ${usableMembers} (low-cloud from ECMWF-ENS ×${cloudMembers}; CAPE from ECMWF-ENS+GEFS ×${capeMembers}).`,
+    `Deterministic trend: ECMWF-IFS (to ${days.length}d)${hasEu ? ' + ICON-EU (≤5d, independent cross-check)' : ''}.`,
+    'Note: low-cloud cover is the VFR proxy (Open-Meteo serves no usable cloud base); precipitation is shown for context only (not a No-Go trigger).',
     'Member count shrinks toward the end of the horizon as shorter-range models drop out.',
     'This is a coarse confidence measure for planning — not a substitute for an official pre-flight briefing.',
   ];
@@ -726,7 +734,7 @@ server.tool(
 
 server.tool(
   'wx_outlook',
-  'Longer-range VFR confidence outlook (3–15 days) for an airfield or location. Pools an ensemble (ECMWF-ENS for low cloud; ECMWF-ENS + GEFS for CAPE) and reports, per day, the probability that the day is NO-GO — the share of ensemble members with poor VFR conditions (low cloud above threshold OR high CAPE/thunderstorm potential) during the daylight window. Also shows the deterministic ECMWF-IFS trend alongside. This is the confidence measure for trip planning that short-range METAR/TAF/ICON-D2 cannot provide. Pass an ICAO code (resolved offline from a bundled airport database covering GA fields) or lat/lon directly.',
+  'Longer-range VFR confidence outlook (3–15 days) for an airfield or location. Pools an ensemble (ECMWF-ENS for low cloud; ECMWF-ENS + GEFS for CAPE) and reports, per day, the probability that the day is NO-GO — the share of ensemble members with poor VFR conditions (low cloud above threshold OR high CAPE/thunderstorm potential) during the daylight window. Also shows the deterministic ECMWF-IFS trend, plus the ICON-EU run (≤5 days) as an independent medium-range cross-check that sits between ICON-D2 (48h) and ECMWF (15d). This is the confidence measure for trip planning that short-range METAR/TAF/ICON-D2 cannot provide. Pass an ICAO code (resolved offline from a bundled airport database covering GA fields) or lat/lon directly.',
   {
     icao: z.string().optional().describe('4-letter ICAO airport code (preferred; coords resolved from the station DB). Provide this OR lat+lon.'),
     lat: z.number().optional().describe('Latitude in decimal degrees (alternative to icao)'),
@@ -765,7 +773,9 @@ server.tool(
 
     log(`Outlook ${label} +${days}d window ${startHour}-${endHour}`);
 
-    const [ensResult, detResult] = await Promise.allSettled([
+    // ICON-EU only reaches ~5 days; cap its request so we don't ask beyond its horizon.
+    const iconEuDays = Math.min(days, 5);
+    const [ensResult, detResult, euResult] = await Promise.allSettled([
       ensembleFetch({
         latitude: String(lat),
         longitude: String(lon),
@@ -782,6 +792,14 @@ server.tool(
         forecast_days: String(days),
         timezone: 'auto',
       }) as Promise<OpenMeteoResponse>,
+      openMeteoFetch({
+        latitude: String(lat),
+        longitude: String(lon),
+        hourly: 'cloud_cover_low,cape,precipitation',
+        models: 'icon_eu',
+        forecast_days: String(iconEuDays),
+        timezone: 'auto',
+      }) as Promise<OpenMeteoResponse>,
     ]);
 
     if (ensResult.status !== 'fulfilled') {
@@ -790,12 +808,15 @@ server.tool(
     }
 
     const outlook = computeOutlook(ensResult.value, startHour, endHour, cloudThreshold, capeThreshold);
-    const trend = detResult.status === 'fulfilled'
+    const ecmwfTrend = detResult.status === 'fulfilled'
       ? computeDeterministicTrend(detResult.value, startHour, endHour)
+      : new Map<string, DayTrend>();
+    const iconEuTrend = euResult.status === 'fulfilled'
+      ? computeDeterministicTrend(euResult.value, startHour, endHour)
       : new Map<string, DayTrend>();
 
     const text = `# VFR Outlook — ${label}\nGenerated: ${new Date().toUTCString()}\n\n`
-      + formatOutlook(outlook, trend, label, startHour, endHour, cloudThreshold, capeThreshold);
+      + formatOutlook(outlook, ecmwfTrend, iconEuTrend, label, startHour, endHour, cloudThreshold, capeThreshold);
     return { content: [{ type: 'text' as const, text }] };
   },
 );
@@ -977,7 +998,7 @@ server.tool(
         longitude: pt.lon.toFixed(3),
         hourly: [
           'visibility', 'cloud_cover_low', 'wind_speed_10m', 'wind_direction_10m',
-          'wind_speed_80m', 'wind_direction_80m', 'precipitation', 'cape', 'weather_code', 'cloud_base',
+          'wind_speed_80m', 'wind_direction_80m', 'precipitation', 'cape', 'weather_code',
         ].join(','),
         models: selectModel(pt.lat, pt.lon),
         forecast_hours: String(Math.min(horizon + enrouteHours + 2, 48)),
@@ -1029,8 +1050,11 @@ server.tool(
 
 // Only start the stdio server when run directly (e.g. `node dist/index.js`).
 // When imported — e.g. by the unit tests — skip startup so the pure helpers can
-// be exercised without opening a transport.
-if (import.meta.main) {
+// be exercised without opening a transport. `import.meta.main` only exists on
+// Node ≥24, so fall back to an argv comparison to keep working on Node 18/20/22 LTS.
+const isEntrypoint = (import.meta as ImportMeta & { main?: boolean }).main
+  ?? (process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href);
+if (isEntrypoint) {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
