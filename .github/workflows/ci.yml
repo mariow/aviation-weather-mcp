@@ -16,8 +16,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 24 = current LTS line (ships import.meta.main); 25 = what we develop on.
-        node: [24, 25]
+        # Cover the supported LTS lines (20, 22) plus current (24) and dev (25).
+        # The smoke test boots the server on each, so a startup regression — e.g.
+        # the entrypoint guard breaking on a Node build that lacks import.meta.main
+        # (Node 18 / older 20.x/22.x patches before it was backported) — fails CI.
+        node: [20, 22, 24, 25]
     steps:
       - uses: actions/checkout@v4
 
@@ -28,6 +31,7 @@ jobs:
 
       - run: npm ci
 
-      # Compiles index.ts (also type-checks) and runs the node:test suite.
-      # No network is touched — the tests exercise pure decoders + outlook math.
-      - run: npm test
+      # Build (also type-checks) + node:test suite + startup smoke test. The smoke
+      # test boots the built server and asserts the handshake + all tools register,
+      # so "the server doesn't start" fails CI here. No network is touched.
+      - run: npm run verify

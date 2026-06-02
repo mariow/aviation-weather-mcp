@@ -86,6 +86,7 @@ Claude should respond with the current weather at Frankfurt airport. If it works
 - Outside Central Europe, it falls back to ICON-EU (7km resolution, 120h horizon)
 - ICAO codes are resolved automatically — just use the 4-letter code. Resolution works **offline** from a bundled airport database, so even pure GA fields without a METAR (e.g. EDVY) work; you can also pass `lat`/`lon` directly
 - Visibility is reported in km
+- Open-Meteo serves no usable cloud base, so the hourly NWP forecasts (`wx_icon_d2`, `wx_preflight`, `wx_route`) **derive a cloud ceiling** from pressure-level cloud cover (lowest broken/overcast deck ≥50%, in ft AGL). The output always states it explicitly — `ceil ~1700ft`, `ceil none<8600ft` (no deck below), or `ceil n/a` (no data) — so a missing ceiling never looks like clear skies
 - The 3–15 day outlook is a **coarse confidence measure** (share of ensemble members with poor VFR conditions), not a precise forecast. It uses low-cloud cover as the VFR proxy (Open-Meteo serves no usable cloud base) and shows the ECMWF-IFS trend plus an ICON-EU cross-check for the first ~5 days
 
 ## Usage with Claude Code

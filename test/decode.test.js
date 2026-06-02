@@ -24,6 +24,8 @@ import {
   noGoCategory,
   lookupAirport,
   lerp,
+  deriveCeiling,
+  ceilingStr,
 } from '../dist/index.js';
 
 test('parseVisibSM handles statute-mile encodings', () => {
@@ -123,6 +125,20 @@ test('lookupAirport resolves bundled ICAO codes offline', () => {
   assert.equal(lookupAirport('ZZZZ'), null, 'unknown code → null');
 });
 
+test('lookupAirport resolves typical German airfields, including pure GA fields', () => {
+  // Major airports + GA fields Mario actually flies to. GA fields (EDVY, EDFE,
+  // EDTF) have no METAR, so they would be unresolvable without the bundled DB.
+  const fields = ['EDDM', 'EDDF', 'EDDB', 'EDDL', 'EDDS', 'EDDK', 'EDDH', 'EDJA', 'EDVY', 'EDFE', 'EDTF'];
+  for (const icao of fields) {
+    const c = lookupAirport(icao);
+    assert.ok(c, `${icao} should resolve from the bundled DB`);
+    assert.ok(c.lat > 47 && c.lat < 55.5, `${icao} latitude within Germany (got ${c.lat})`);
+    assert.ok(c.lon > 5 && c.lon < 15.5, `${icao} longitude within Germany (got ${c.lon})`);
+    assert.ok(c.name && c.name.length > 0, `${icao} has a name`);
+  }
+  assert.match(lookupAirport('EDVY').name, /Porta Westfalica/i, 'GA field name resolves');
+});
+
 test('groupDaylightHours keeps only hours within the daylight window', () => {
   const time = [
     '2026-06-07T05:00', '2026-06-07T08:00', '2026-06-07T12:00',
@@ -206,4 +222,49 @@ test('computeDeterministicTrend aggregates daylight max/sum per day', () => {
   assert.equal(day.maxLowCloud, 70, 'max over daylight hours only');
   assert.equal(day.maxCape, 800);
   assert.equal(day.precipSum, 1.5, 'sum over daylight hours only');
+});
+
+test('deriveCeiling finds the lowest BKN/OVC deck as ft AGL', () => {
+  const data = {
+    elevation: 100,
+    hourly: {
+      cloud_cover_1000hPa: [0], geopotential_height_1000hPa: [150],
+      cloud_cover_975hPa: [10], geopotential_height_975hPa: [350],
+      cloud_cover_950hPa: [40], geopotential_height_950hPa: [560],
+      cloud_cover_925hPa: [90], geopotential_height_925hPa: [800], // first ≥50% → ceiling
+    },
+  };
+  const c = deriveCeiling(data, 0);
+  assert.equal(c.kind, 'ceiling');
+  assert.equal(c.ft, 2297, '(800m − 100m) × 3.281 ≈ 2297 ft AGL');
+});
+
+test('deriveCeiling reports "no deck" (NOT clear) when every level is below threshold', () => {
+  // Critical for safety: scattered cloud must not read as a confirmed clear sky.
+  const data = {
+    elevation: 0,
+    hourly: {
+      cloud_cover_1000hPa: [0], geopotential_height_1000hPa: [110],
+      cloud_cover_925hPa: [30], geopotential_height_925hPa: [770],
+      cloud_cover_700hPa: [20], geopotential_height_700hPa: [3000],
+    },
+  };
+  const c = deriveCeiling(data, 0);
+  assert.equal(c.kind, 'none');
+  assert.equal(c.belowFt, Math.round(3000 * 3.281), 'highest checked level, AGL');
+});
+
+test('deriveCeiling returns nodata when pressure data or elevation is missing', () => {
+  assert.equal(deriveCeiling({ elevation: 100, hourly: {} }, 0).kind, 'nodata', 'no pressure levels → nodata');
+  assert.equal(
+    deriveCeiling({ hourly: { cloud_cover_950hPa: [80], geopotential_height_950hPa: [500] } }, 0).kind,
+    'nodata',
+    'no elevation → nodata',
+  );
+});
+
+test('ceilingStr renders every state distinctly and never blank', () => {
+  assert.equal(ceilingStr({ kind: 'ceiling', ft: 1700 }), 'ceil ~1700ft');
+  assert.equal(ceilingStr({ kind: 'none', belowFt: 8600 }), 'ceil none<8600ft');
+  assert.equal(ceilingStr({ kind: 'nodata' }), 'ceil n/a', 'missing data is explicit, not empty');
 });
