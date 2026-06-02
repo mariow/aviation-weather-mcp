@@ -14,8 +14,10 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test",
+    "test:smoke": "npm run build && node scripts/smoke.mjs",
     "test:live": "npm run build && RUN_LIVE_TESTS=1 node --test test/live.test.js",
-    "prepublishOnly": "npm run build"
+    "verify": "npm run build && node --test && node scripts/smoke.mjs",
+    "prepublishOnly": "npm run verify"
   },
   "keywords": [
     "mcp",
@@ -34,7 +36,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mariow/aviation-weather-mcp"
+    "url": "git+https://github.com/mariow/aviation-weather-mcp.git"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
