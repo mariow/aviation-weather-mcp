@@ -1121,8 +1121,9 @@ server.tool(
 
 // Only start the stdio server when run directly (e.g. `node dist/index.js`).
 // When imported — e.g. by the unit tests — skip startup so the pure helpers can
-// be exercised without opening a transport. `import.meta.main` only exists on
-// Node ≥24, so fall back to an argv comparison to keep working on Node 18/20/22 LTS.
+// be exercised without opening a transport. `import.meta.main` is absent on older
+// Node (Node 18, and 20.x/22.x patches before it was backported), so fall back to an
+// argv/import.meta.url comparison to keep the server starting everywhere.
 const isEntrypoint = (import.meta as ImportMeta & { main?: boolean }).main
   ?? (process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href);
 if (isEntrypoint) {
