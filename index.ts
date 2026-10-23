@@ -36,6 +36,39 @@ function log(msg: string): void {
   console.error(`[AVWX] ${msg}`);
 }
 
+// ─── Node runtime security guard ────────────────────────────────────────────
+// This server fetches from third-party weather hosts over HTTPS, so it is
+// exposed to the October 2026 Node.js CVEs that live in the fetch/TLS path —
+// most seriously CVE-2026-111497, an out-of-bounds write in the Brotli decoder
+// that global `fetch`/undici invokes automatically on any response carrying
+// `Content-Encoding: br`. That cannot be mitigated in application code (undici
+// decodes by the response header regardless of what we advertise), so the fix is
+// the Node version itself. These are the minimum builds carrying the fixes.
+// See SECURITY-NODE-2026-10.md and
+// https://nodejs.org/en/blog/vulnerability/october-2026-security-releases
+const MIN_SECURE_NODE: Record<number, [minor: number, patch: number]> = {
+  22: [23, 4], // 22.23.4 (LTS)
+  24: [22, 1], // 24.22.1 (LTS)
+  26: [12, 1], // 26.12.1 (Current)
+};
+
+function isSecureNode(version: string): boolean {
+  const [maj, min, pat] = version.split('.').map(Number);
+  if (maj > 26) return true; // future majors are assumed patched
+  const floor = MIN_SECURE_NODE[maj];
+  if (floor == null) return false; // EOL lines (<= 20) and odd dev lines (23, 25)
+  return min > floor[0] || (min === floor[0] && pat >= floor[1]);
+}
+
+function checkNodeSecurity(): void {
+  if (isSecureNode(process.versions.node)) return;
+  log(
+    `WARNING: Node ${process.versions.node} is missing the October 2026 security ` +
+    `fixes (incl. CVE-2026-111497, a Brotli-decoder RCE reachable through fetch). ` +
+    `Upgrade to Node >= 22.23.4, 24.22.1, or 26.12.1. See SECURITY-NODE-2026-10.md.`,
+  );
+}
+
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
 async function avwxFetch(endpoint: string, params: Record<string, string>): Promise<unknown> {
@@ -1127,6 +1160,7 @@ server.tool(
 const isEntrypoint = (import.meta as ImportMeta & { main?: boolean }).main
   ?? (process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href);
 if (isEntrypoint) {
+  checkNodeSecurity();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

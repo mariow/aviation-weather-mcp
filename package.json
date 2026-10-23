@@ -34,6 +34,9 @@
     "model-context-protocol"
   ],
   "license": "MIT",
+  "engines": {
+    "node": ">=22.23.4 <23 || >=24.22.1 <25 || >=26.12.1"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mariow/aviation-weather-mcp.git"

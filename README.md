@@ -13,13 +13,17 @@ Just ask Claude things like:
 You need two things installed:
 
 1. **Claude Desktop** — download from https://claude.ai/download
-2. **Node.js** (version 18 or later) — download from https://nodejs.org (pick the LTS version)
+2. **Node.js** — download from https://nodejs.org (pick the LTS version). Use a
+   patched release: **22.23.4+**, **24.22.1+**, or **26.12.1+**. These carry the
+   October 2026 security fixes (including a Brotli-decoder RCE reachable through
+   `fetch`); older builds and the end-of-life Node 20 are vulnerable. The server
+   prints a warning on startup if it detects an unpatched Node.
 
 To check if Node.js is already installed, open Terminal (Mac) or Command Prompt (Windows) and type:
 ```
 node --version
 ```
-If you see a version number like `v22.x.x`, you're good to go.
+If you see a version at or above `v22.23.4` (or `v24.22.1` / `v26.12.1`), you're good to go. If it's lower, update Node from https://nodejs.org.
 
 ## Setup (3 minutes)
 
