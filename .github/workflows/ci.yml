@@ -16,11 +16,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Cover the supported LTS lines (20, 22) plus current (24) and dev (25).
+        # Cover the supported LTS lines (22, 24) plus current (26). Node 20 is
+        # end-of-life and received no patch for the October 2026 security CVEs
+        # (see SECURITY-NODE-2026-10.md), so it is no longer tested. These major
+        # tags resolve to the latest patch, which carries the security fixes.
         # The smoke test boots the server on each, so a startup regression — e.g.
         # the entrypoint guard breaking on a Node build that lacks import.meta.main
-        # (Node 18 / older 20.x/22.x patches before it was backported) — fails CI.
-        node: [20, 22, 24, 25]
+        # (older patches before it was backported) — fails CI.
+        node: [22, 24, 26]
     steps:
       - uses: actions/checkout@v4
 
